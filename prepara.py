@@ -6,7 +6,7 @@ Scarica i file originali dei modelli, gratuiti e pubblici:
   - ECMWF IFS 0,25°  (data.ecmwf.int, «open data»)
   - ICON-EU 0,0625°  (opendata.dwd.de, servizio meteo tedesco)
   - GFS 0,25°        (nomads.ncep.noaa.gov, servizio meteo americano, già ritagliato sull'Europa)
-li ritaglia su due zone (Europa ogni 0,5° e Italia ogni 0,1°), ogni 3 ore fino a 5 giorni,
+li ritaglia su due zone (Europa larga ogni 0,5° e Italia ogni 0,1°), ogni 3 ore fino a 5 giorni,
 e scrive per ogni modello, zona e variabile un file compresso:  m/<modello>/<zona>/<variabile>.bin
 (numeri interi a 16 bit compressi con gzip: valore = offset + scala × numero; -32768 = manca).
 In index.json ci sono la corsa, le ore e come leggere i numeri. L'app scarica solo quello che serve.
@@ -35,7 +35,7 @@ SITE = 'https://antonioamatosalerno-lang.github.io/meteo-dati/'
 STEPS = list(range(0, 121, 3))
 LEVELS = [850, 700, 500, 250]
 DOMAINS = {
-    'eu': dict(w=-30.0, e=45.0, s=25.0, n=72.0, step=0.5),
+    'eu': dict(w=-45.0, e=60.0, s=22.0, n=75.0, step=0.5),
     'it': dict(w=5.0, e=20.0, s=35.0, n=48.0, step=0.1),
 }
 for d in DOMAINS.values():
@@ -340,7 +340,7 @@ def gfs():
 
     def one(s):
         url = (f'https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{run:%Y%m%d}%2F{run:%H}%2Fatmos'
-               f'&file=gfs.t{run:%H}z.pgrb2.0p25.f{s:03d}&{var}&{lev}&subregion=&toplat=73&leftlon=-31&rightlon=46&bottomlat=24')
+               f'&file=gfs.t{run:%H}z.pgrb2.0p25.f{s:03d}&{var}&{lev}&subregion=&toplat=76&leftlon=-46&rightlon=61&bottomlat=21')
         data = get(url)
         return s, messages(data) if data else []
 
