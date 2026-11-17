@@ -1,0 +1,51 @@
+# Prepara i dati delle mappe di Meteo Center ogni 3 ore e li pubblica su GitHub Pages.
+name: Mappe meteo
+on:
+  schedule:
+    - cron: '20 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      modelli:
+        description: 'Modelli (ecmwf,icon,gfs)'
+        default: 'ecmwf,icon,gfs'
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: mappe
+  cancel-in-progress: false
+jobs:
+  prepara:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    environment:
+      name: github-pages
+      url: ${{ steps.pubblica.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Programmi per leggere i file dei modelli
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libeccodes-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -q numpy requests eccodes ecmwf-opendata
+      - name: Scarica e prepara i modelli
+        run: python prepara.py sito "${{ github.event.inputs.modelli || 'ecmwf,icon,gfs' }}"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: sito
+      - id: pubblica
+        uses: actions/deploy-pages@v4
+      # GitHub spegne i lavori programmati dopo 60 giorni senza modifiche: una volta a settimana si segna la data
+      - name: Resta acceso
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date -u +%u%H)" = "100" ] || [ "$(date -u +%u%H)" = "101" ] || [ "$(date -u +%u%H)" = "102" ]; then
+            date -u > ultimo-giro.txt
+            git config user.name "mappe-meteo"
+            git config user.email "mappe-meteo@users.noreply.github.com"
+            git add ultimo-giro.txt && git commit -m "Ancora acceso" && git push || true
+          fi
