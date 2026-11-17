@@ -3,6 +3,8 @@ name: Mappe meteo
 on:
   schedule:
     - cron: '20 */3 * * *'
+    # il bollettino delle allerte esce verso le 16 (ora italiana): due giri in più subito dopo
+    - cron: '40 14,15 * * *'
   workflow_dispatch:
     inputs:
       modelli:
@@ -33,6 +35,8 @@ jobs:
           python-version: '3.12'
       - run: pip install -q numpy requests eccodes ecmwf-opendata
       - name: Scarica e prepara i modelli
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python prepara.py sito "${{ github.event.inputs.modelli || 'ecmwf,icon,gfs' }}"
       - uses: actions/upload-pages-artifact@v3
         with:

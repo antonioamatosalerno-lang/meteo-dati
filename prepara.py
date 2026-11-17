@@ -431,6 +431,51 @@ def keep_old(name, old):
     return m
 
 
+# ====================================================================== allerte della Protezione Civile
+
+DPC = 'pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica'
+
+
+def allerte():
+    """L'ultimo bollettino di criticità della Protezione Civile (zone d'allerta di oggi e domani), alleggerito.
+    Dati aperti CC-BY 4.0: https://github.com/pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica"""
+    h = {'Accept': 'application/vnd.github+json'}
+    if os.environ.get('GITHUB_TOKEN'):
+        h['Authorization'] = 'Bearer ' + os.environ['GITHUB_TOKEN']
+    commits = S.get(f'https://api.github.com/repos/{DPC}/commits?path=files/geojson&per_page=1', headers=h, timeout=60).json()
+    sha = commits[0]['sha']
+    files = S.get(f'https://api.github.com/repos/{DPC}/commits/{sha}', headers=h, timeout=60).json()['files']
+    names = [x['filename'] for x in files if x['filename'].startswith('files/geojson/') and x['filename'].endswith('_today.json')]
+    if not names:
+        raise RuntimeError('bollettino non trovato')
+    stem = names[0][len('files/geojson/'):-len('_today.json')]          # es. 20261117_1519
+    day = dt.datetime.strptime(stem[:8], '%Y%m%d').date()
+
+    def level(s):
+        s = (s or '').upper()
+        return 3 if 'ROSSA' in s else 2 if 'ARANCIONE' in s else 1 if 'GIALLA' in s else 0
+
+    def rnd(c):
+        return [rnd(x) for x in c] if isinstance(c, list) and c and isinstance(c[0], list) else [round(c[0], 3), round(c[1], 3)]
+
+    out = {'issued': stem, 'source': 'Protezione Civile - Bollettino di criticità (CC-BY 4.0)', 'days': {}}
+    for part, d in (('today', day), ('tomorrow', day + dt.timedelta(days=1))):
+        g = json.loads(get(f'https://raw.githubusercontent.com/{DPC}/master/files/geojson/{stem}_{part}.json'))
+        zones = []
+        for ft in g['features']:
+            p = ft['properties']
+            geo = ft['geometry']
+            zones.append({'zona': p.get('Nome zona', ''),
+                          'temporali': level(p.get('Per rischio temporali')),
+                          'idrogeologico': level(p.get('Per rischio idrogeologico')),
+                          'idraulico': level(p.get('Per rischio idraulico')),
+                          'type': geo['type'], 'coords': rnd(geo['coordinates'])})
+        out['days'][d.isoformat()] = zones
+    with open(os.path.join(OUT, 'allerte.json'), 'w') as f:
+        json.dump(out, f, separators=(',', ':'))
+    log('allerte: bollettino', stem, 'zone', len(out['days'][day.isoformat()]))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     try:
@@ -460,6 +505,14 @@ def main():
             m = keep_old(name, old)
             if m:
                 index['models'][name] = m
+    try:
+        allerte()
+    except Exception:
+        traceback.print_exc()
+        data = get(SITE + 'allerte.json')      # se non va, si tiene quello di prima
+        if data:
+            with open(os.path.join(OUT, 'allerte.json'), 'wb') as f:
+                f.write(data)
     with open(os.path.join(OUT, 'index.json'), 'w') as f:
         json.dump(index, f)
     with open(os.path.join(OUT, 'index.html'), 'w') as f:
