@@ -437,9 +437,12 @@ def main():
         old = json.loads(get(SITE + 'index.json') or b'{}')
     except ValueError:
         old = {}
+    same_zones = json.dumps(old.get('domains'), sort_keys=True) == json.dumps(DOMAINS, sort_keys=True)
     for k, v in (old.get('models') or {}).items():
-        if v:
+        if v and same_zones:   # se le zone sono cambiate si rifà tutto
             PREV[k] = v['run']
+    if not same_zones:
+        old = {}
     index = {'made': int(time.time() * 1000), 'domains': DOMAINS, 'models': {}}
     for name, fn in (('ecmwf', ecmwf), ('icon', icon), ('gfs', gfs)):
         t0 = time.time()
