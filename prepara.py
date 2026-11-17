@@ -442,13 +442,15 @@ def allerte():
     h = {'Accept': 'application/vnd.github+json'}
     if os.environ.get('GITHUB_TOKEN'):
         h['Authorization'] = 'Bearer ' + os.environ['GITHUB_TOKEN']
-    commits = S.get(f'https://api.github.com/repos/{DPC}/commits?path=files/geojson&per_page=1', headers=h, timeout=60).json()
-    sha = commits[0]['sha']
-    files = S.get(f'https://api.github.com/repos/{DPC}/commits/{sha}', headers=h, timeout=60).json()['files']
-    names = [x['filename'] for x in files if x['filename'].startswith('files/geojson/') and x['filename'].endswith('_today.json')]
+    # l'elenco completo dei bollettini (cartella files/geojson) e si prende il più recente
+    def tree(sha):
+        return S.get(f'https://api.github.com/repos/{DPC}/git/trees/{sha}', headers=h, timeout=60).json()['tree']
+    files_sha = next(x['sha'] for x in tree('master') if x['path'] == 'files')
+    geo_sha = next(x['sha'] for x in tree(files_sha) if x['path'] == 'geojson')
+    names = sorted(x['path'] for x in tree(geo_sha) if x['path'].endswith('_today.json'))
     if not names:
         raise RuntimeError('bollettino non trovato')
-    stem = names[0][len('files/geojson/'):-len('_today.json')]          # es. 20261117_1519
+    stem = names[-1][:-len('_today.json')]          # es. 20261117_1519
     day = dt.datetime.strptime(stem[:8], '%Y%m%d').date()
 
     def level(s):
