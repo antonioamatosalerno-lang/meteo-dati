@@ -19,6 +19,7 @@ import concurrent.futures as cf
 import datetime as dt
 import gzip
 import json
+import re
 import os
 import sys
 import tempfile
@@ -614,13 +615,19 @@ def vig_testo(html):
     import html as H
     import re
     out = {}
+    cur = None
     for p in re.findall(r'<p[^>]*>(.*?)</p>', html, flags=re.S):
         t = H.unescape(re.sub(r'<[^>]+>', ' ', p))
         t = re.sub(r'\s+', ' ', t).strip()
-        m = re.match(r'([A-Za-zÀ-ÿ ]{3,20}?)\s*:\s*(.+)', t)
+        if not t:
+            continue
+        m = re.match(r'([A-Za-zÀ-ÿ ]{3,20}?)\s*:\s*(.*)', t)
         if m:
-            out[m.group(1).strip().capitalize()] = m.group(2).strip()
-    return out
+            cur = m.group(1).strip().capitalize()
+            out[cur] = m.group(2).strip()
+        elif cur:   # il testo continua nel paragrafo dopo (es. un elenco con i trattini)
+            out[cur] = (out[cur] + '\n' + t).strip()
+    return {k: v for k, v in out.items() if v}
 
 
 def vigilanza(days):
@@ -723,9 +730,12 @@ def meteoalarm(days):
             t1 = dt.datetime.fromisoformat(i['expires']).astimezone(ROME)
             # il testo: descrizione (senza l'avvertenza finale) e cosa fare
             desc = (i.get('description') or '').split('(DISCLAIMER')[0].strip()
+            # in fondo le zone in maiuscolo («… intensità APPENNINO»): in minuscolo, tra parentesi
+            desc = re.sub(r"\s+([A-ZÀ-Ý][A-ZÀ-Ý ,']{2,})\.?$", lambda m: ' (zone: ' + m.group(1).strip().lower() + ').', desc)
+            if desc and not desc.endswith('.'):
+                desc += '.'
             istr = (i.get('instruction') or '').strip()
             # la prima frase arriva tutta in maiuscolo («STARE (RIMANERE) ATTENTI.»): in minuscolo, il resto com'è
-            import re
             istr = re.sub(r"^([^a-z.]{4,})\.", lambda m: m.group(1).capitalize().replace(' (rimanere)', '') + '.', istr)
             for ar in i.get('area', []):
                 avvisi.setdefault(norm(ar['areaDesc']), []).append((tipo, lv, t0, t1, testo_n(desc), testo_n(istr)))
