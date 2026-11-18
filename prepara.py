@@ -585,6 +585,22 @@ FENOMENI = {1: 'piogge sparse', 2: 'piogge diffuse', 3: 'nevicate', 4: 'nevicate
             10: 'venti forti', 11: 'venti di burrasca', 12: 'venti di tempesta', 13: 'forti raffiche di vento',
             40: 'mare molto mosso', 41: 'mare agitato', 42: 'mare grosso'}
 PIOGGIA = {3: 'piogge moderate', 4: 'piogge abbondanti', 5: 'piogge molto abbondanti'}
+# per ogni tipo di fenomeno si tiene solo il più forte: (tipo, forza)
+FORZA = {'piogge sparse': ('p', 1), 'piogge diffuse': ('p', 2), 'piogge moderate': ('p', 3), 'piogge abbondanti': ('p', 4),
+         'piogge molto abbondanti': ('p', 5), 'rovesci o temporali': ('t', 1), 'rovesci o temporali diffusi': ('t', 2),
+         'nevicate': ('n', 1), 'nevicate abbondanti': ('n', 2), 'forti raffiche di vento': ('v', 0), 'venti forti': ('v', 1),
+         'venti di burrasca': ('v', 2), 'venti di tempesta': ('v', 3),
+         'mare molto mosso': ('m', 1), 'mare agitato': ('m', 2), 'mare grosso': ('m', 3)}
+
+
+def piu_forti(vg):
+    best = {}
+    for n in vg:
+        k, f = FORZA.get(n, (n, 0))
+        if k not in best or f > best[k][1]:
+            best[k] = (n, f)
+    ordine = 'tvpnm'
+    return [n for k, (n, f) in sorted(best.items(), key=lambda x: ordine.find(x[0]) if x[0] in ordine else 9)]
 
 
 def vigilanza(days):
@@ -625,10 +641,10 @@ def vigilanza(days):
                 nome = FENOMENI.get(code)
                 if not nome or nome in vg or not (x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1):
                     continue
-                if inside(pt, pl) or min(km(pt, v) for v in verts) < 45:
+                if inside(pt, pl) or min(km(pt, v) for v in verts) < 35:
                     vg.append(nome)
             if vg:
-                z['vg'] = vg
+                z['vg'] = piu_forti(vg)
     log('vigilanza: bollettino del', emesso, 'giorni', parti)
 
 
