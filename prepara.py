@@ -38,11 +38,11 @@ LEVELS = [850, 700, 500, 250]
 DOMAINS = {
     'eu': dict(w=-45.0, e=60.0, s=22.0, n=75.0, step=0.5),
     'it': dict(w=5.0, e=20.0, s=35.0, n=48.0, step=0.1),
-    # emisfero nord, tutto il giro del mondo fino quasi al polo (la cartina arriva a 85°): solo ECMWF, che è globale
+    # emisfero nord, tutto il giro del mondo fino quasi al polo (la cartina arriva a 85°)
     'nh': dict(w=-180.0, e=180.0, s=0.0, n=85.0, step=1.0),
 }
-# le zone che ogni modello copre (ICON-EU e GFS ritagliato: solo Europa e Italia)
-ZONE_MODELLO = {'ecmwf': ('eu', 'it', 'nh'), 'icon': ('eu', 'it'), 'gfs': ('eu', 'it')}
+# le zone che ogni modello copre: ECMWF e GFS sono mondiali; ICON: Europa e Italia da ICON-EU, emisfero nord da ICON mondiale
+ZONE_MODELLO = {'ecmwf': ('eu', 'it', 'nh'), 'icon': ('eu', 'it', 'nh'), 'gfs': ('eu', 'it', 'nh')}
 for d in DOMAINS.values():
     d['nx'] = int(round((d['e'] - d['w']) / d['step'])) + 1
     d['ny'] = int(round((d['n'] - d['s']) / d['step'])) + 1
@@ -282,7 +282,7 @@ def icon():
         raise RuntimeError('nessuna corsa ICON-EU completa')
     log('ICON corsa', run)
     same('icon', run)
-    st = Store(ZONE_MODELLO['icon'])
+    st = Store(('eu', 'it'))           # l'emisfero nord lo riempie ICON mondiale, qui sotto
     single = {'t_2m': ('t2m', lambda x: x - 273.15), 'u_10m': ('u10', lambda x: x * 3.6), 'v_10m': ('v10', lambda x: x * 3.6),
               'pmsl': ('msl', lambda x: x / 100), 'tot_prec': ('tp', None), 'clct': ('tcc', None),
               'vmax_10m': ('gust', lambda x: x * 3.6), 'hzerocl': ('zero', None),
@@ -306,6 +306,11 @@ def icon():
                     var = {'fi': 'z'}.get(v, v) + str(l)
                     conv = {'t': lambda x: x - 273.15, 'u': lambda x: x * 3.6, 'v': lambda x: x * 3.6, 'fi': lambda x: x / 9.80665}[v]
                 st.put(var, s, m, conv or (lambda x: x))
+    try:
+        icon_global(run, st, single)
+    except Exception:
+        traceback.print_exc()
+        log('ICON mondiale non riuscito: solo Europa')
     deaccumulate(st, 'tp', 1)
     deaccumulate(st, 'sfa', 1)
     deaccumulate(st, 'sfb', 1)
@@ -320,6 +325,93 @@ def icon():
         if z is not None:
             st.set('zero', dom, np.where(z < 0, 0, z))
     return run, st
+
+
+def icon_global(run, st, single):
+    """ICON mondiale (griglia a triangoli): ogni cella finisce nel suo quadretto di 1° dell'emisfero nord, e si fa la media."""
+    D = DOMAINS['nh']
+    base = 'https://opendata.dwd.de/weather/nwp/icon/grib/'
+
+    def vals(data):
+        with tempfile.NamedTemporaryFile(suffix='.grib2', delete=False) as f:
+            f.write(data)
+            name = f.name
+        try:
+            with open(name, 'rb') as f:
+                h = eccodes.codes_grib_new_from_file(f)
+                try:
+                    return eccodes.codes_get_values(h).astype(np.float32)
+                finally:
+                    eccodes.codes_release(h)
+        finally:
+            os.unlink(name)
+
+    if not head_ok(base + f'{run:%H}/t_2m/icon_global_icosahedral_single-level_{run:%Y%m%d%H}_120_T_2M.grib2.bz2'):
+        raise RuntimeError('ICON mondiale: corsa non completa')
+    lat = lon = None
+    for c in ('clat', 'clon'):
+        data = None
+        for h in (run.hour, 0):     # le coordinate sono sempre le stesse: va bene anche quelle di un'altra corsa
+            data = get(base + f'{h:02d}/{c}/icon_global_icosahedral_time-invariant_{run:%Y%m%d}{h:02d}_{c.upper()}.grib2.bz2')
+            if data:
+                break
+        if not data:
+            raise RuntimeError('ICON mondiale: mancano le coordinate')
+        a = vals(bz2.decompress(data)).astype(np.float64)
+        if np.nanmax(np.abs(a)) < 7:       # in radianti
+            a = np.degrees(a)
+        if c == 'clat':
+            lat = a
+        else:
+            lon = ((a + 180) % 360) - 180
+    j = np.round((lat - D['s']) / D['step']).astype(int)
+    i = np.round((lon - D['w']) / D['step']).astype(int) % (D['nx'] - 1)
+    sel = (j >= 0) & (j < D['ny'])
+    idx = (j * D['nx'] + i)[sel]
+    cnt = np.bincount(idx, minlength=D['nx'] * D['ny']).astype(np.float64)
+    log('ICON mondiale: celle', int(sel.sum()), 'quadretti vuoti', int((cnt.reshape(D['ny'], D['nx'])[:, :-1] == 0).sum()))
+
+    def grid(v):
+        s = np.bincount(idx, weights=v[sel].astype(np.float64), minlength=D['nx'] * D['ny'])
+        with np.errstate(invalid='ignore', divide='ignore'):
+            g = (s / cnt).reshape(D['ny'], D['nx'])
+        g[:, -1] = g[:, 0]               # 180° = -180°
+        return g.astype(np.float32)
+
+    def url(s, v, l):
+        if l is None:
+            return base + f'{run:%H}/{v}/icon_global_icosahedral_single-level_{run:%Y%m%d%H}_{s:03d}_{v.upper()}.grib2.bz2'
+        return base + f'{run:%H}/{v}/icon_global_icosahedral_pressure-level_{run:%Y%m%d%H}_{s:03d}_{l}_{v.upper()}.grib2.bz2'
+
+    jobs = [(v, None, s) for v in single for s in STEPS] + \
+        [(v, l, s) for v in ('t', 'u', 'v', 'fi') for l in LEVELS for s in STEPS]
+
+    def one(job):
+        v, l, s = job
+        data = get(url(s, v, l))
+        if not data:
+            return job, None
+        x = vals(bz2.decompress(data))
+        if x.size != lat.size:
+            return job, None
+        return job, grid(x)
+
+    out, manca = {}, 0
+    with cf.ThreadPoolExecutor(12) as ex:
+        for (v, l, s), g in ex.map(one, jobs):
+            if g is None:
+                manca += 1
+                continue
+            if l is None:
+                var, conv = single[v]
+            else:
+                var = {'fi': 'z'}.get(v, v) + str(l)
+                conv = {'t': lambda x: x - 273.15, 'u': lambda x: x * 3.6, 'v': lambda x: x * 3.6, 'fi': lambda x: x / 9.80665}[v]
+            a = out.setdefault(var, np.full((len(STEPS), D['ny'], D['nx']), np.nan, np.float32))
+            a[STEPS.index(s)] = (conv or (lambda x: x))(g)
+    for var, a in out.items():
+        st.set(var, 'nh', a)
+    log('ICON mondiale: campi', len(jobs) - manca, 'di', len(jobs))
 
 
 def icon_url(run, step, var, level=None):
@@ -353,7 +445,7 @@ def gfs():
 
     def one(s):
         url = (f'https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.{run:%Y%m%d}%2F{run:%H}%2Fatmos'
-               f'&file=gfs.t{run:%H}z.pgrb2.0p25.f{s:03d}&{var}&{lev}&subregion=&toplat=76&leftlon=-46&rightlon=61&bottomlat=21')
+               f'&file=gfs.t{run:%H}z.pgrb2.0p25.f{s:03d}&{var}&{lev}&subregion=&toplat=86&leftlon=0&rightlon=360&bottomlat=-1')
         data = get(url)
         return s, messages(data) if data else []
 
@@ -405,19 +497,17 @@ def gfs():
 def write(name, run, st):
     times = [int((run + dt.timedelta(hours=s)).replace(tzinfo=dt.timezone.utc).timestamp() * 1000) for s in STEPS]
     info = {'run': run.strftime('%Y-%m-%dT%H:00Z'), 'times': times, 'vars': {}}
-    doms = ZONE_MODELLO.get(name, tuple(DOMAINS))
-    info['doms'] = list(doms)
-    for var in ALL_VARS:
+    has = lambda var, dom: st.get(var, dom) is not None and not np.all(np.isnan(st.get(var, dom)))
+    vars_ok = [v for v in ALL_VARS if has(v, 'eu') and has(v, 'it')]
+    for v in ALL_VARS:
+        if v not in vars_ok:
+            log(name, 'senza', v)
+    # una zona in più (emisfero nord) si pubblica solo se ha tutte le mappe che ha l'Europa
+    doms = ['eu', 'it'] + [d for d in ZONE_MODELLO.get(name, ()) if d not in ('eu', 'it') and all(has(v, d) for v in vars_ok)]
+    info['doms'] = doms
+    log(name, 'zone', doms)
+    for var in vars_ok:
         sc, off = quant(var)
-        okall = True
-        for dom in doms:
-            a = st.get(var, dom)
-            if a is None or np.all(np.isnan(a)):
-                okall = False
-                break
-        if not okall:
-            log(name, 'senza', var)
-            continue
         for dom in doms:
             a = st.get(var, dom)
             q = np.round((a - off) / sc)
