@@ -496,6 +496,22 @@ def allerte():
     out['t'] = TESTI
     with open(os.path.join(OUT, 'allerte.json'), 'w') as f:
         json.dump(out, f, separators=(',', ':'))
+    # versione leggera per l'app (1.9.2 in poi): i confini delle zone una volta sola, per ogni giorno solo le zone con qualcosa
+    first = next(iter(out['days'].values()))
+    light = {'issued': out['issued'], 'source': out['source'], 'vt': out.get('vt', {}), 't': out.get('t', []),
+             'zones': [{'z': z['zona'], 'type': z['type'], 'coords': z['coords']} for z in first], 'days': {}}
+    for d, zones in out['days'].items():
+        day = {}
+        for i, z in enumerate(zones):
+            e = {k: z[k] for k in ('temporali', 'idrogeologico', 'idraulico') if z.get(k)}
+            for k in ('av', 'vg'):
+                if z.get(k):
+                    e[k] = z[k]
+            if e:
+                day[str(i)] = e
+        light['days'][d] = day
+    with open(os.path.join(OUT, 'allerte2.json'), 'w') as f:
+        json.dump(light, f, separators=(',', ':'))
     log('allerte: bollettino', stem, 'giorni', list(out['days']))
 
 
@@ -790,10 +806,11 @@ def main():
         allerte()
     except Exception:
         traceback.print_exc()
-        data = get(SITE + 'allerte.json')      # se non va, si tiene quello di prima
-        if data:
-            with open(os.path.join(OUT, 'allerte.json'), 'wb') as f:
-                f.write(data)
+        for name in ('allerte.json', 'allerte2.json'):
+            data = get(SITE + name)      # se non va, si tiene quello di prima
+            if data:
+                with open(os.path.join(OUT, name), 'wb') as f:
+                    f.write(data)
     with open(os.path.join(OUT, 'index.json'), 'w') as f:
         json.dump(index, f)
     with open(os.path.join(OUT, 'index.html'), 'w') as f:
