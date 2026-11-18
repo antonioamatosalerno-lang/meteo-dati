@@ -38,7 +38,11 @@ LEVELS = [850, 700, 500, 250]
 DOMAINS = {
     'eu': dict(w=-45.0, e=60.0, s=22.0, n=75.0, step=0.5),
     'it': dict(w=5.0, e=20.0, s=35.0, n=48.0, step=0.1),
+    # emisfero nord, tutto il giro del mondo fino quasi al polo (la cartina arriva a 85°): solo ECMWF, che è globale
+    'nh': dict(w=-180.0, e=180.0, s=0.0, n=85.0, step=1.0),
 }
+# le zone che ogni modello copre (ICON-EU e GFS ritagliato: solo Europa e Italia)
+ZONE_MODELLO = {'ecmwf': ('eu', 'it', 'nh'), 'icon': ('eu', 'it'), 'gfs': ('eu', 'it')}
 for d in DOMAINS.values():
     d['nx'] = int(round((d['e'] - d['w']) / d['step'])) + 1
     d['ny'] = int(round((d['n'] - d['s']) / d['step'])) + 1
@@ -140,8 +144,12 @@ def regrid(m, dom):
     oj = np.argsort(lo, kind='stable')
     oi = np.argsort(lats, kind='stable')
     key = (dom, len(lats), float(lats[0]), float(lats[-1]), len(lons), float(lons[0]), float(lons[-1]))
+    # campo globale: si ripete la prima colonna dopo l'ultima, così si chiude il giro a 180°
+    giro = len(lo) > 2 and float(lo.max() - lo.min()) + 1.5 * abs(float(lons[1] - lons[0])) >= 360
     if key not in _grid_cache:
         la, lo2 = lats[oi], lo[oj]
+        if giro:
+            lo2 = np.append(lo2, lo2[0] + 360)
         tl = D['s'] + np.arange(D['ny']) * D['step']
         tg = D['w'] + np.arange(D['nx']) * D['step']
         fi = np.interp(tl, la, np.arange(len(la)), left=np.nan, right=np.nan)
@@ -149,6 +157,8 @@ def regrid(m, dom):
         _grid_cache[key] = (fi, fj)
     fi, fj = _grid_cache[key]
     v = v[oi][:, oj]
+    if giro:
+        v = np.concatenate([v, v[:, :1]], axis=1)
     okI, okJ = ~np.isnan(fi), ~np.isnan(fj)
     i0 = np.clip(np.floor(np.nan_to_num(fi)).astype(int), 0, v.shape[0] - 2)
     j0 = np.clip(np.floor(np.nan_to_num(fj)).astype(int), 0, v.shape[1] - 2)
@@ -162,15 +172,17 @@ def regrid(m, dom):
 
 
 class Store:
-    """Raccoglie i campi di un modello: var → zona → array (ore, ny, nx)."""
-    def __init__(self):
+    """Raccoglie i campi di un modello: var → zona → array (ore, ny, nx), solo per le zone [doms]."""
+    def __init__(self, doms=tuple(DOMAINS)):
         self.data = {}
+        self.doms = doms
 
     def put(self, var, step, m, conv=lambda x: x):
         if step not in STEPS:
             return
         k = STEPS.index(step)
-        for dom, D in DOMAINS.items():
+        for dom in self.doms:
+            D = DOMAINS[dom]
             a = self.data.setdefault(var, {}).setdefault(dom, np.full((len(STEPS), D['ny'], D['nx']), np.nan, np.float32))
             a[k] = conv(regrid(m, dom))
 
@@ -214,7 +226,7 @@ def ecmwf():
     run = c.latest(type='fc', step=120, param='2t')
     log('ECMWF corsa', run)
     same('ecmwf', run)
-    st = Store()
+    st = Store(ZONE_MODELLO['ecmwf'])
     tmp = tempfile.mkdtemp()
 
     def fetch(name, **kw):
@@ -270,7 +282,7 @@ def icon():
         raise RuntimeError('nessuna corsa ICON-EU completa')
     log('ICON corsa', run)
     same('icon', run)
-    st = Store()
+    st = Store(ZONE_MODELLO['icon'])
     single = {'t_2m': ('t2m', lambda x: x - 273.15), 'u_10m': ('u10', lambda x: x * 3.6), 'v_10m': ('v10', lambda x: x * 3.6),
               'pmsl': ('msl', lambda x: x / 100), 'tot_prec': ('tp', None), 'clct': ('tcc', None),
               'vmax_10m': ('gust', lambda x: x * 3.6), 'hzerocl': ('zero', None),
@@ -333,7 +345,7 @@ def gfs():
         raise RuntimeError('nessuna corsa GFS completa')
     log('GFS corsa', run)
     same('gfs', run)
-    st = Store()
+    st = Store(ZONE_MODELLO['gfs'])
     var = '&'.join(f'var_{v}=on' for v in ('TMP', 'UGRD', 'VGRD', 'HGT', 'PRMSL', 'APCP', 'CSNOW', 'TCDC', 'GUST'))
     lev = '&'.join(f'lev_{l}=on' for l in ('2_m_above_ground', '10_m_above_ground', 'mean_sea_level', 'surface', 'entire_atmosphere',
                                            '0C_isotherm') + tuple(f'{p}_mb' for p in LEVELS))
@@ -356,9 +368,9 @@ def gfs():
                 elif sh == 'prmsl':
                     st.put('msl', s, m, lambda x: x / 100)
                 elif sh == 'tp':
-                    apcp[s] = (m['end'] - m['start'], {d: regrid(m, d) for d in DOMAINS})
+                    apcp[s] = (m['end'] - m['start'], {d: regrid(m, d) for d in st.doms})
                 elif sh == 'csnow':
-                    csnow[s] = {d: regrid(m, d) for d in DOMAINS}
+                    csnow[s] = {d: regrid(m, d) for d in st.doms}
                 elif sh == 'tcc' and tl == 'atmosphere':
                     st.put('tcc', s, m)
                 elif sh == 'gust' and tl == 'surface':
@@ -369,7 +381,8 @@ def gfs():
                     conv = {'t': lambda x: x - 273.15, 'u': lambda x: x * 3.6, 'v': lambda x: x * 3.6, 'gh': lambda x: x}[sh]
                     st.put({'gh': 'z'}.get(sh, sh) + str(lv), s, m, conv)
     # pioggia: GFS dà secchi di 3 o 6 ore
-    for dom, D in DOMAINS.items():
+    for dom in st.doms:
+        D = DOMAINS[dom]
         tp = np.zeros((len(STEPS), D['ny'], D['nx']), np.float32)
         sf = np.zeros_like(tp)
         for k, s in enumerate(STEPS):
@@ -392,10 +405,12 @@ def gfs():
 def write(name, run, st):
     times = [int((run + dt.timedelta(hours=s)).replace(tzinfo=dt.timezone.utc).timestamp() * 1000) for s in STEPS]
     info = {'run': run.strftime('%Y-%m-%dT%H:00Z'), 'times': times, 'vars': {}}
+    doms = ZONE_MODELLO.get(name, tuple(DOMAINS))
+    info['doms'] = list(doms)
     for var in ALL_VARS:
         sc, off = quant(var)
         okall = True
-        for dom in DOMAINS:
+        for dom in doms:
             a = st.get(var, dom)
             if a is None or np.all(np.isnan(a)):
                 okall = False
@@ -403,7 +418,7 @@ def write(name, run, st):
         if not okall:
             log(name, 'senza', var)
             continue
-        for dom in DOMAINS:
+        for dom in doms:
             a = st.get(var, dom)
             q = np.round((a - off) / sc)
             q = np.where(np.isnan(q), -32768, np.clip(q, -32767, 32767)).astype('<i2')
