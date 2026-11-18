@@ -490,6 +490,9 @@ def allerte():
         except Exception:
             traceback.print_exc()
             log('allerte:', name, 'non riuscito')
+    # i testi: della vigilanza per giorno, degli avvisi in un elenco (le zone li indicano col numero)
+    out['vt'] = {k: v for k, v in VIG_TESTI.items() if k in out['days']}
+    out['t'] = TESTI
     with open(os.path.join(OUT, 'allerte.json'), 'w') as f:
         json.dump(out, f, separators=(',', ':'))
     log('allerte: bollettino', stem, 'giorni', list(out['days']))
@@ -603,6 +606,23 @@ def piu_forti(vg):
     return [n for k, (n, f) in sorted(best.items(), key=lambda x: ordine.find(x[0]) if x[0] in ordine else 9)]
 
 
+VIG_TESTI = {}   # giorno → {argomento: testo}
+
+
+def vig_testo(html):
+    """«<p><strong>Venti:</strong> forti …</p>…» → {'Venti': 'forti …', …}"""
+    import html as H
+    import re
+    out = {}
+    for p in re.findall(r'<p[^>]*>(.*?)</p>', html, flags=re.S):
+        t = H.unescape(re.sub(r'<[^>]+>', ' ', p))
+        t = re.sub(r'\s+', ' ', t).strip()
+        m = re.match(r'([A-Za-zÀ-ÿ ]{3,20}?)\s*:\s*(.+)', t)
+        if m:
+            out[m.group(1).strip().capitalize()] = m.group(2).strip()
+    return out
+
+
 def vigilanza(days):
     """Per ogni zona e giorno: i fenomeni segnalati dal bollettino di vigilanza meteo nazionale (campo «vg»)."""
     oggi = dt.datetime.now(ROME).date()
@@ -621,6 +641,10 @@ def vigilanza(days):
         giorno = (emesso + dt.timedelta(days=n)).isoformat()
         if giorno not in days:
             continue
+        # il testo del bollettino, diviso per argomento (Precipitazioni, Venti, Mari…)
+        testo = vig_testo(idx[k].get('html_description') or '')
+        if testo:
+            VIG_TESTI[giorno] = testo
         files = idx[k].get('topo_json') or []
         zone_f = next((f for f in files if 'fenomeni' not in f), None)
         fen_f = next((f for f in files if 'fenomeni' in f), None)
@@ -655,6 +679,18 @@ TIPI = {1: 'vento', 2: 'neve o ghiaccio', 3: 'temporali', 4: 'nebbia', 5: 'caldo
         8: 'incendi', 9: 'valanghe', 10: 'pioggia', 12: 'alluvioni', 13: 'pioggia e alluvioni'}
 
 
+TESTI = []   # i testi degli avvisi, una volta sola ciascuno
+
+
+def testo_n(s):
+    """Il numero del testo nell'elenco TESTI (lo aggiunge se manca); -1 se vuoto."""
+    if not s:
+        return -1
+    if s not in TESTI:
+        TESTI.append(s)
+    return TESTI.index(s)
+
+
 def meteoalarm(days):
     """Per ogni zona e giorno: gli avvisi gialli, arancioni e rossi della sua regione (campo «av»: tipo, livello, dalle, alle)."""
     norm = lambda s: ''.join(ch for ch in s.lower() if ch.isalpha())[:6]
@@ -685,8 +721,14 @@ def meteoalarm(days):
                 continue
             t0 = dt.datetime.fromisoformat(i.get('onset') or i['effective']).astimezone(ROME)
             t1 = dt.datetime.fromisoformat(i['expires']).astimezone(ROME)
+            # il testo: descrizione (senza l'avvertenza finale) e cosa fare
+            desc = (i.get('description') or '').split('(DISCLAIMER')[0].strip()
+            istr = (i.get('instruction') or '').strip()
+            # la prima frase arriva tutta in maiuscolo («STARE (RIMANERE) ATTENTI.»): in minuscolo, il resto com'è
+            import re
+            istr = re.sub(r"^([^a-z.]{4,})\.", lambda m: m.group(1).capitalize().replace(' (rimanere)', '') + '.', istr)
             for ar in i.get('area', []):
-                avvisi.setdefault(norm(ar['areaDesc']), []).append((tipo, lv, t0, t1))
+                avvisi.setdefault(norm(ar['areaDesc']), []).append((tipo, lv, t0, t1, testo_n(desc), testo_n(istr)))
     for giorno, zones in days.items():
         d0 = dt.datetime.fromisoformat(giorno).replace(tzinfo=ROME)
         d1 = d0 + dt.timedelta(days=1)
@@ -694,12 +736,12 @@ def meteoalarm(days):
             c = centro(polys(z['type'], z['coords']))
             r = next((n for n, pl in reg if inside(c, pl)), None)
             best = {}
-            for tipo, lv, t0, t1 in avvisi.get(r, []):
+            for tipo, lv, t0, t1, td, ti in avvisi.get(r, []):
                 if t1 <= d0 or t0 >= d1:
                     continue
                 a, b = max(t0, d0), min(t1, d1)
                 if tipo not in best or lv > best[tipo][1]:
-                    best[tipo] = [tipo, lv, a.strftime('%H:%M'), '24:00' if b >= d1 else b.strftime('%H:%M')]
+                    best[tipo] = [tipo, lv, a.strftime('%H:%M'), '24:00' if b >= d1 else b.strftime('%H:%M'), td, ti]
             if best:
                 z['av'] = sorted(best.values(), key=lambda x: -x[1])
     log('meteoalarm: regioni con avvisi', sorted(avvisi))
