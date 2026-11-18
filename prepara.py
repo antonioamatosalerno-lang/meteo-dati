@@ -499,7 +499,7 @@ def allerte():
     # versione leggera per l'app (1.9.2 in poi): i confini delle zone una volta sola, per ogni giorno solo le zone con qualcosa
     first = next(iter(out['days'].values()))
     light = {'issued': out['issued'], 'source': out['source'], 'vt': out.get('vt', {}), 't': out.get('t', []),
-             'zones': [{'z': z['zona'], 'type': z['type'], 'coords': z['coords']} for z in first], 'days': {}}
+             'zones': [{'z': z['zona'], 'type': z['type'], 'coords': semplifica(z['coords'])} for z in first], 'days': {}}
     for d, zones in out['days'].items():
         day = {}
         for i, z in enumerate(zones):
@@ -516,6 +516,20 @@ def allerte():
 
 
 # ---------------------------------------------------------------------- strumenti per le zone
+
+def semplifica(c, step=0.007):
+    """Confini più leggeri: in ogni anello si tiene un punto solo se dista almeno [step] gradi (circa 700 m) dall'ultimo tenuto."""
+    if isinstance(c, list) and c and isinstance(c[0], (int, float)):
+        return c
+    if isinstance(c, list) and c and isinstance(c[0], list) and c[0] and isinstance(c[0][0], (int, float)):
+        out = [c[0]]
+        for p in c[1:-1]:
+            if abs(p[0] - out[-1][0]) + abs(p[1] - out[-1][1]) >= step:
+                out.append(p)
+        out.append(c[-1])
+        return out if len(out) >= 4 else c
+    return [semplifica(x, step) for x in c]
+
 
 from zoneinfo import ZoneInfo
 ROME = ZoneInfo('Europe/Rome')
