@@ -460,7 +460,9 @@ def allerte():
     def rnd(c):
         return [rnd(x) for x in c] if isinstance(c, list) and c and isinstance(c[0], list) else [round(c[0], 3), round(c[1], 3)]
 
-    out = {'issued': stem, 'source': 'Protezione Civile - Bollettino di criticità (CC-BY 4.0)', 'days': {}}
+    out = {'issued': stem, 'source': 'Protezione Civile - Bollettini di criticità e di vigilanza meteo (CC-BY 4.0); '
+                                     'Aeronautica Militare via Meteoalarm', 'days': {}}
+    geom = None
     for part, d in (('today', day), ('tomorrow', day + dt.timedelta(days=1))):
         g = json.loads(get(f'https://raw.githubusercontent.com/{DPC}/master/files/geojson/{stem}_{part}.json'))
         zones = []
@@ -473,9 +475,218 @@ def allerte():
                           'idraulico': level(p.get('Per rischio idraulico')),
                           'type': geo['type'], 'coords': rnd(geo['coordinates'])})
         out['days'][d.isoformat()] = zones
+        geom = geom or zones
+    # oggi e domani ci sono sempre (anche prima che esca il bollettino di criticità del giorno): zone senza criticità
+    oggi = dt.datetime.now(ROME).date()
+    for d in (oggi, oggi + dt.timedelta(days=1)):
+        if d.isoformat() not in out['days']:
+            out['days'][d.isoformat()] = [dict(z, temporali=0, idrogeologico=0, idraulico=0) for z in geom]
+    for k in [k for k in out['days'] if k < oggi.isoformat()]:
+        del out['days'][k]
+    # gli altri bollettini, zona per zona
+    for name, fn in (('vigilanza', vigilanza), ('meteoalarm', meteoalarm)):
+        try:
+            fn(out['days'])
+        except Exception:
+            traceback.print_exc()
+            log('allerte:', name, 'non riuscito')
     with open(os.path.join(OUT, 'allerte.json'), 'w') as f:
         json.dump(out, f, separators=(',', ':'))
-    log('allerte: bollettino', stem, 'zone', len(out['days'][day.isoformat()]))
+    log('allerte: bollettino', stem, 'giorni', list(out['days']))
+
+
+# ---------------------------------------------------------------------- strumenti per le zone
+
+from zoneinfo import ZoneInfo
+ROME = ZoneInfo('Europe/Rome')
+
+
+def polys(typ, c):
+    """Elenco di poligoni (ognuno: lista di anelli [[lon, lat], ...]) di una geometria."""
+    return [c] if typ == 'Polygon' else list(c)
+
+
+def inside(pt, pl):
+    """Il punto è dentro la geometria (lista di poligoni con eventuali buchi)?"""
+    x, y = pt
+    for poly in pl:
+        n = 0
+        for ring in poly:
+            inr = False
+            j = len(ring) - 1
+            for i in range(len(ring)):
+                xi, yi = ring[i]
+                xj, yj = ring[j]
+                if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+                    inr = not inr
+                j = i
+            n += inr
+        if n % 2 == 1:
+            return True
+    return False
+
+
+def centro(pl):
+    """Un punto dentro la zona (il centro del poligono più grande, o un suo vertice vicino)."""
+    big = max(pl, key=lambda p: len(p[0]))[0]
+    cx = sum(p[0] for p in big) / len(big)
+    cy = sum(p[1] for p in big) / len(big)
+    if inside((cx, cy), pl):
+        return cx, cy
+    return min(big, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+
+
+def km(a, b):
+    import math
+    dx = (a[0] - b[0]) * 111.3 * math.cos(math.radians((a[1] + b[1]) / 2))
+    return math.hypot(dx, (a[1] - b[1]) * 111.3)
+
+
+def topo(tj):
+    """TopoJSON → [(proprietà, lista di poligoni)]."""
+    tr = tj.get('transform')
+    arcs = []
+    for a in tj['arcs']:
+        if tr:
+            x = y = 0
+            pts = []
+            for dx, dy in a:
+                x += dx
+                y += dy
+                pts.append([x * tr['scale'][0] + tr['translate'][0], y * tr['scale'][1] + tr['translate'][1]])
+        else:
+            pts = [list(p[:2]) for p in a]
+        arcs.append(pts)
+
+    def ring(ids):
+        r = []
+        for i in ids:
+            p = arcs[i] if i >= 0 else arcs[~i][::-1]
+            r += p if not r else p[1:]
+        return r
+    out = []
+    for obj in tj['objects'].values():
+        for g in obj['geometries']:
+            if g['type'] == 'Polygon':
+                out.append((g.get('properties', {}), [[ring(r) for r in g['arcs']]]))
+            elif g['type'] == 'MultiPolygon':
+                out.append((g.get('properties', {}), [[ring(r) for r in p] for p in g['arcs']]))
+            elif g['type'] == 'Point':
+                out.append((g.get('properties', {}), None))
+    return out
+
+
+# ---------------------------------------------------------------------- bollettino di vigilanza meteo (Protezione Civile)
+
+VIG = 'https://raw.githubusercontent.com/pcm-dpc/DPC-Bollettini-Vigilanza-Meteorologica/master/files/'
+# i simboli della mappa (codici ricavati confrontando simboli e testo del bollettino)
+FENOMENI = {1: 'piogge sparse', 2: 'piogge diffuse', 3: 'nevicate', 4: 'nevicate abbondanti',
+            5: 'rovesci o temporali', 6: 'rovesci o temporali', 7: 'rovesci o temporali diffusi',
+            10: 'venti forti', 11: 'venti di burrasca', 12: 'venti di tempesta', 13: 'forti raffiche di vento',
+            40: 'mare molto mosso', 41: 'mare agitato', 42: 'mare grosso'}
+PIOGGIA = {3: 'piogge moderate', 4: 'piogge abbondanti', 5: 'piogge molto abbondanti'}
+
+
+def vigilanza(days):
+    """Per ogni zona e giorno: i fenomeni segnalati dal bollettino di vigilanza meteo nazionale (campo «vg»)."""
+    oggi = dt.datetime.now(ROME).date()
+    idx = None
+    for d in (oggi, oggi - dt.timedelta(days=1)):
+        try:
+            idx = json.loads(get(VIG + d.strftime('%Y%m%d') + '.json'))
+            emesso = d
+            break
+        except Exception:
+            continue
+    if not idx:
+        raise RuntimeError('bollettino di vigilanza non trovato')
+    parti = [k for k in ('today', 'tomorrow', 'aftertomorrow') if isinstance(idx.get(k), dict)]
+    for n, k in enumerate(parti):
+        giorno = (emesso + dt.timedelta(days=n)).isoformat()
+        if giorno not in days:
+            continue
+        files = idx[k].get('topo_json') or []
+        zone_f = next((f for f in files if 'fenomeni' not in f), None)
+        fen_f = next((f for f in files if 'fenomeni' in f), None)
+        vz = topo(json.loads(get(zone_f))) if zone_f else []
+        pts = [(p.get('id_fenomeno'), (p['lon'], p['lat'])) for p, _ in topo(json.loads(get(fen_f)))] if fen_f else []
+        for z in days[giorno]:
+            pl = polys(z['type'], z['coords'])
+            c = centro(pl)
+            vg = []
+            for p, g in vz:
+                if g and inside(c, g) and PIOGGIA.get(p.get('id_classificazione')):
+                    vg.append(PIOGGIA[p['id_classificazione']])
+                    break
+            verts = [v for poly in pl for v in poly[0][::4]]
+            x0, x1 = min(v[0] for v in verts) - 0.7, max(v[0] for v in verts) + 0.7
+            y0, y1 = min(v[1] for v in verts) - 0.5, max(v[1] for v in verts) + 0.5
+            for code, pt in pts:
+                nome = FENOMENI.get(code)
+                if not nome or nome in vg or not (x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1):
+                    continue
+                if inside(pt, pl) or min(km(pt, v) for v in verts) < 45:
+                    vg.append(nome)
+            if vg:
+                z['vg'] = vg
+    log('vigilanza: bollettino del', emesso, 'giorni', parti)
+
+
+# ---------------------------------------------------------------------- avvisi dell'Aeronautica Militare (Meteoalarm)
+
+REGIONI = 'https://raw.githubusercontent.com/openpolis/geojson-italy/master/geojson/limits_IT_regions.geojson'
+TIPI = {1: 'vento', 2: 'neve o ghiaccio', 3: 'temporali', 4: 'nebbia', 5: 'caldo', 6: 'freddo', 7: 'mareggiate',
+        8: 'incendi', 9: 'valanghe', 10: 'pioggia', 12: 'alluvioni', 13: 'pioggia e alluvioni'}
+
+
+def meteoalarm(days):
+    """Per ogni zona e giorno: gli avvisi gialli, arancioni e rossi della sua regione (campo «av»: tipo, livello, dalle, alle)."""
+    norm = lambda s: ''.join(ch for ch in s.lower() if ch.isalpha())[:6]
+    reg = [(norm(f['properties']['reg_name']), polys(f['geometry']['type'], f['geometry']['coordinates']))
+           for f in json.loads(get(REGIONI))['features']]
+    feed = json.loads(get('https://feeds.meteoalarm.org/api/v1/warnings/feeds-italy'))['warnings']
+    superati = set()
+    for w in feed:
+        for ref in (w['alert'].get('references') or '').split():
+            parts = ref.split(',')
+            if len(parts) >= 2:
+                superati.add(parts[1])
+    avvisi = {}   # regione → [(tipo, livello, inizio, fine)]
+    for w in feed:
+        a = w['alert']
+        if a['identifier'] in superati or a.get('msgType') == 'Cancel':
+            continue
+        for i in a.get('info', []):
+            if not i.get('language', '').startswith('it'):
+                continue
+            par = {p['valueName']: p['value'] for p in i.get('parameter', [])}
+            try:
+                lv = int(par['awareness_level'].split(';')[0]) - 1      # 2 giallo → 1, 3 arancione → 2, 4 rosso → 3
+                tipo = TIPI.get(int(par['awareness_type'].split(';')[0]))
+            except (KeyError, ValueError):
+                continue
+            if lv < 1 or not tipo:
+                continue
+            t0 = dt.datetime.fromisoformat(i.get('onset') or i['effective']).astimezone(ROME)
+            t1 = dt.datetime.fromisoformat(i['expires']).astimezone(ROME)
+            for ar in i.get('area', []):
+                avvisi.setdefault(norm(ar['areaDesc']), []).append((tipo, lv, t0, t1))
+    for giorno, zones in days.items():
+        d0 = dt.datetime.fromisoformat(giorno).replace(tzinfo=ROME)
+        d1 = d0 + dt.timedelta(days=1)
+        for z in zones:
+            c = centro(polys(z['type'], z['coords']))
+            r = next((n for n, pl in reg if inside(c, pl)), None)
+            best = {}
+            for tipo, lv, t0, t1 in avvisi.get(r, []):
+                if t1 <= d0 or t0 >= d1:
+                    continue
+                a, b = max(t0, d0), min(t1, d1)
+                if tipo not in best or lv > best[tipo][1]:
+                    best[tipo] = [tipo, lv, a.strftime('%H:%M'), '24:00' if b >= d1 else b.strftime('%H:%M')]
+            if best:
+                z['av'] = sorted(best.values(), key=lambda x: -x[1])
+    log('meteoalarm: regioni con avvisi', sorted(avvisi))
 
 
 def main():
