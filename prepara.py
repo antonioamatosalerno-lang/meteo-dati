@@ -6,6 +6,8 @@ Scarica i file originali dei modelli, gratuiti e pubblici:
   - ECMWF IFS 0,25°  (data.ecmwf.int, «open data»)
   - ICON-EU 0,0625°  (opendata.dwd.de, servizio meteo tedesco)
   - GFS 0,25°        (nomads.ncep.noaa.gov, servizio meteo americano, già ritagliato sull'Europa)
+  - ECMWF onde (stream «wave»): altezza, direzione e periodo dell'onda; temperatura del mare (skt sul mare)
+  - NASA GEOS-FP (opendap.nccs.nasa.gov): polvere del deserto al suolo e a 850/700/500 hPa («modello» geos)
 li ritaglia su due zone (Europa larga ogni 0,5° e Italia ogni 0,1°), ogni 3 ore fino a 5 giorni,
 e scrive per ogni modello, zona e variabile un file compresso:  m/<modello>/<zona>/<variabile>.bin
 (numeri interi a 16 bit compressi con gzip: valore = offset + scala × numero; -32768 = manca).
@@ -31,7 +33,7 @@ import numpy as np
 import requests
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else 'sito'
-ONLY = sys.argv[2].split(',') if len(sys.argv) > 2 else ['ecmwf', 'icon', 'gfs']
+ONLY = sys.argv[2].split(',') if len(sys.argv) > 2 else ['ecmwf', 'icon', 'gfs', 'geos']
 SITE = 'https://antonioamatosalerno-lang.github.io/meteo-dati/'
 STEPS = list(range(0, 121, 3))
 LEVELS = [850, 700, 500, 250]
@@ -42,7 +44,7 @@ DOMAINS = {
     'nh': dict(w=-180.0, e=180.0, s=0.0, n=85.0, step=1.0),
 }
 # le zone che ogni modello copre: ECMWF e GFS sono mondiali; ICON: Europa e Italia da ICON-EU, emisfero nord da ICON mondiale
-ZONE_MODELLO = {'ecmwf': ('eu', 'it', 'nh'), 'icon': ('eu', 'it', 'nh'), 'gfs': ('eu', 'it', 'nh')}
+ZONE_MODELLO = {'ecmwf': ('eu', 'it', 'nh'), 'icon': ('eu', 'it', 'nh'), 'gfs': ('eu', 'it', 'nh'), 'geos': ('eu', 'it', 'nh')}
 for d in DOMAINS.values():
     d['nx'] = int(round((d['e'] - d['w']) / d['step'])) + 1
     d['ny'] = int(round((d['n'] - d['s']) / d['step'])) + 1
@@ -51,13 +53,18 @@ for d in DOMAINS.values():
 QUANT = {'t': (0.01, 0), 'z': (1.0, 0), 'u': (0.02, 0), 'v': (0.02, 0), 'tp': (0.01, 0), 'sf': (0.01, 0),
          'tcc': (0.01, 0), 'gust': (0.01, 0), 'msl': (0.01, 1000), 'zero': (1.0, 0)}
 def quant(var):
+    if var.startswith('du'):
+        return (0.1, 0)          # polvere in µg/m³: fino a 3000
     for k in ('tp', 'sf', 'tcc', 'gust', 'msl', 'zero'):
         if var == k:
             return QUANT[k]
     return QUANT[var[0]] if var[0] in 'tzuv' else (0.01, 0)
 
 ALL_VARS = ['t2m', 'u10', 'v10', 'msl', 'tp', 'sf', 'tcc', 'gust', 'zero'] + \
-    [f'{p}{l}' for l in LEVELS for p in ('t', 'z', 'u', 'v')]
+    [f'{p}{l}' for l in LEVELS for p in ('t', 'z', 'u', 'v')] + \
+    ['tmax', 'tmin', 'swh', 'mwd', 'mwp', 'sst']          # (queste le dà solo ECMWF)
+ONLY_ECMWF = ('tmax', 'tmin', 'swh', 'mwd', 'mwp', 'sst')
+DUST_VARS = ['dusfc', 'du850', 'du700', 'du500']
 
 PREV = {}  # corse già pubblicate la volta prima: modello → 'AAAA-MM-GGTHH:00Z'
 
@@ -262,6 +269,125 @@ def ecmwf():
         var = {'gh': 'z'}.get(m['short'], m['short']) + str(m['level'])
         st.put(var, m['end'], m, conv)
     freezing_from_levels(st)
+    try:
+        ecmwf_extra(c, run, st, fetch)
+    except Exception:
+        traceback.print_exc()
+    return run, st
+
+
+def direction(st, var, msgs):
+    """Una direzione (gradi) sulla griglia: si interpolano seno e coseno, sennò tra 350° e 10° verrebbe 180°."""
+    for m in msgs:
+        if m['end'] not in STEPS:
+            continue
+        a = np.deg2rad(m['vals'])
+        ms = dict(m, vals=np.sin(a).astype(np.float32))
+        mc = dict(m, vals=np.cos(a).astype(np.float32))
+        for dom in st.doms:
+            D = DOMAINS[dom]
+            arr = st.data.setdefault(var, {}).setdefault(dom, np.full((len(STEPS), D['ny'], D['nx']), np.nan, np.float32))
+            arr[STEPS.index(m['end'])] = (np.rad2deg(np.arctan2(regrid(ms, dom), regrid(mc, dom))) + 360) % 360
+
+
+def ecmwf_extra(c, run, st, fetch):
+    """Temperatura massima e minima vere (nelle 3 ore), temperatura del mare, onde."""
+    for p, var in (('mx2t3', 'tmax'), ('mn2t3', 'tmin')):
+        for m in messages(fetch(p, param=p) or b''):
+            st.put(var, m['end'], m, lambda x: x - 273.15)
+    # il mare: la temperatura della superficie (skt) dove c'è acqua (lsm < 0,5)
+    lsm = messages(fetch('lsm', param='lsm') or b'')
+    if lsm:
+        land = lsm[0]['vals'] >= 0.5
+        for m in messages(fetch('skt', param='skt') or b''):
+            v = m['vals'] - 273.15
+            v[land] = np.nan
+            st.put('sst', m['end'], dict(m, vals=v.astype(np.float32)))
+    # le onde (modello del mare di ECMWF): fino a 5 giorni alle 00 e 12, meno alle 06 e 18
+    path = os.path.join(tempfile.mkdtemp(), 'onde.grib2')
+    data = None
+    for steps in (STEPS, [x for x in STEPS if x <= 90]):
+        try:
+            c.retrieve(date=run.strftime('%Y%m%d'), time=run.hour, stream='wave', type='fc', step=steps,
+                       param=['swh', 'mwd', 'mwp'], target=path)
+            with open(path, 'rb') as f:
+                data = f.read()
+            break
+        except Exception as e:  # noqa
+            log('ECMWF onde, riprovo:', e)
+    if not data:
+        log('ECMWF: niente onde')
+        return
+    ms = messages(data)
+    for m in ms:
+        if m['short'] in ('swh', 'mwp'):
+            st.put(m['short'], m['end'], m)
+    direction(st, 'mwd', [m for m in ms if m['short'] == 'mwd'])
+
+
+# ====================================================================== NASA GEOS-FP: polvere del deserto
+
+GEOS = 'https://opendap.nccs.nasa.gov/dods/GEOS-5/fp/0.25_deg/fcast/'
+# densità dell'aria (kg/m³) alle quote, con l'atmosfera media: per passare da kg di polvere per kg d'aria a µg/m³
+RHO = {850: 1.06, 700: 0.91, 500: 0.69}
+
+
+def geos_runs(prod):
+    page = (get(GEOS + prod) or b'').decode('utf-8', 'replace')
+    return sorted(set(re.findall(prod + r'\.(\d{8}_\d{2})', page)))
+
+
+def dods(url):
+    """Un pezzo di un campo GEOS (protocollo DAP2 binario): i numeri dopo «Data:»."""
+    data = get(url, tries=4)
+    if not data:
+        raise RuntimeError('GEOS non risponde: ' + url[:120])
+    k = data.index(b'\nData:\n') + 7
+    v = np.frombuffer(data[k + 8:], dtype='>f4').astype(np.float32)
+    v[v > 1e14] = np.nan
+    return v
+
+
+def geos():
+    # la corsa più recente che arriva almeno a 5 giorni (alle 00 arriva a 10 giorni, alle altre ore meno)
+    runs = geos_runs('inst3_3d_aer_Np')
+    run = None
+    for rid in reversed(runs[-6:]):
+        dds = (get(f'{GEOS}inst3_3d_aer_Np/inst3_3d_aer_Np.{rid}.dds') or b'').decode()
+        mt = re.search(r'time = (\d+)', dds)
+        if mt and int(mt.group(1)) >= len(STEPS):
+            run = dt.datetime.strptime(rid, '%Y%m%d_%H')
+            break
+    if run is None:
+        raise RuntimeError('GEOS: nessuna corsa lunga abbastanza')
+    log('GEOS corsa', run)
+    same('geos', run)
+    rid = run.strftime('%Y%m%d_%H')
+    st = Store(('eu', 'it', 'nh'))
+    nt = len(STEPS)
+    lats_all = -90 + 0.25 * np.arange(721)
+    lons_all = -180 + 0.3125 * np.arange(1152)
+    # due ritagli: Europa (fitto, serve anche per l'Italia) ed emisfero nord (più largo)
+    cuts = {'eu': (448, 660, 2, 432, 768, 2), 'nh': (360, 700, 4, 0, 1151, 3)}
+    levs = {850: 5, 700: 8, 500: 12}
+    for cut, (y0, y1, ys, x0, x1, xs) in cuts.items():
+        doms = ('eu', 'it') if cut == 'eu' else ('nh',)
+        la = lats_all[y0:y1 + 1:ys]
+        lo = lons_all[x0:x1 + 1:xs]
+        jobs = [(f'du{lev}', f'{GEOS}inst3_3d_aer_Np/inst3_3d_aer_Np.{rid}.dods?du.du[0:{nt - 1}][{li}][{y0}:{ys}:{y1}][{x0}:{xs}:{x1}]',
+                 RHO[lev] * 1e9) for lev, li in levs.items()]
+        jobs.append(('dusfc', f'{GEOS}tavg3_2d_aer_Nx/tavg3_2d_aer_Nx.{rid}.dods?dusmass.dusmass[0:{nt - 1}][{y0}:{ys}:{y1}][{x0}:{xs}:{x1}]', 1e9))
+        for var, url, k in jobs:
+            v = dods(url)
+            n = len(la) * len(lo)
+            v = v[:(len(v) // n) * n].reshape(-1, len(la), len(lo)) * k
+            for i in range(min(nt, v.shape[0])):
+                m = dict(vals=v[i], lats=la, lons=lo)
+                for dom in doms:
+                    D = DOMAINS[dom]
+                    arr = st.data.setdefault(var, {}).setdefault(dom, np.full((nt, D['ny'], D['nx']), np.nan, np.float32))
+                    arr[i] = np.maximum(regrid(m, dom), 0)
+            log('GEOS', cut, var, 'ok', v.shape)
     return run, st
 
 
@@ -498,8 +624,11 @@ def write(name, run, st):
     times = [int((run + dt.timedelta(hours=s)).replace(tzinfo=dt.timezone.utc).timestamp() * 1000) for s in STEPS]
     info = {'run': run.strftime('%Y-%m-%dT%H:00Z'), 'times': times, 'vars': {}}
     has = lambda var, dom: st.get(var, dom) is not None and not np.all(np.isnan(st.get(var, dom)))
-    vars_ok = [v for v in ALL_VARS if has(v, 'eu') and has(v, 'it')]
-    for v in ALL_VARS:
+    names = DUST_VARS if name == 'geos' else ALL_VARS
+    vars_ok = [v for v in names if has(v, 'eu') and has(v, 'it')]
+    for v in names:
+        if name != 'ecmwf' and v in ONLY_ECMWF:
+            continue
         if v not in vars_ok:
             log(name, 'senza', v)
     # una zona in più (emisfero nord) si pubblica solo se ha tutte le mappe che ha l'Europa
@@ -904,8 +1033,10 @@ def main():
             PREV[k] = v['run']
     if not same_zones:
         old = {}
+    if len(sys.argv) > 3 and sys.argv[3] == 'forza':   # prova: si rifà tutto anche se la corsa è la stessa
+        PREV.clear()
     index = {'made': int(time.time() * 1000), 'domains': DOMAINS, 'models': {}}
-    for name, fn in (('ecmwf', ecmwf), ('icon', icon), ('gfs', gfs)):
+    for name, fn in (('ecmwf', ecmwf), ('icon', icon), ('gfs', gfs), ('geos', geos)):
         t0 = time.time()
         try:
             if name not in ONLY:

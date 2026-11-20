@@ -8,8 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       modelli:
-        description: 'Modelli (ecmwf,icon,gfs)'
-        default: 'ecmwf,icon,gfs'
+        description: 'Modelli (ecmwf,icon,gfs,geos)'
+        default: 'ecmwf,icon,gfs,geos'
+      forza:
+        description: 'Rifare anche le corse già pubblicate (forza)'
+        default: ''
 permissions:
   contents: write
   pages: write
@@ -37,7 +40,7 @@ jobs:
       - name: Scarica e prepara i modelli
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python prepara.py sito "${{ github.event.inputs.modelli || 'ecmwf,icon,gfs' }}"
+        run: python prepara.py sito "${{ github.event.inputs.modelli || 'ecmwf,icon,gfs,geos' }}" "${{ github.event.inputs.forza }}"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: sito
