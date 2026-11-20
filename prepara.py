@@ -142,11 +142,40 @@ def messages(data):
     return out
 
 
+def boxmean(v, k):
+    """Media su una finestra k×k (i NaN non contano): ogni punto diventa la media della sua zona."""
+    if k < 2:
+        return v
+    ok = ~np.isnan(v)
+    a = np.where(ok, v, 0).astype(np.float64)
+    w = ok.astype(np.float64)
+
+    def msum(x, axis):
+        x = np.moveaxis(x, axis, 0)
+        n = x.shape[0]
+        c = np.concatenate([np.zeros((1,) + x.shape[1:]), np.cumsum(x, axis=0)])
+        lo = np.clip(np.arange(n) - k // 2, 0, n)
+        hi = np.clip(np.arange(n) - k // 2 + k, 0, n)
+        return np.moveaxis(c[hi] - c[lo], 0, axis)
+    S = msum(msum(a, 0), 1)
+    W = msum(msum(w, 0), 1)
+    return np.where(W > 0, S / np.maximum(W, 1e-9), np.nan).astype(np.float32)
+
+
+# pioggia, neve e nuvole: su una griglia più larga del modello si fa la MEDIA della zona di ogni quadretto, non il valore
+# di un punto solo (sennò un rovescio di 10-20 km spariva guardando l'Europa e ricompariva zoomando)
+AREA = ('tp', 'sf', 'tcc')
+
 _grid_cache = {}
-def regrid(m, dom):
-    """Il campo [m] sulla griglia della zona [dom] (interpolazione bilineare)."""
+def regrid(m, dom, area=False):
+    """Il campo [m] sulla griglia della zona [dom] (interpolazione bilineare; [area] = prima la media della zona)."""
     D = DOMAINS[dom]
     lats, lons, v = m['lats'], m['lons'], m['vals']
+    if area and len(lons) > 1 and len(lats) > 1:
+        src = min(abs(float(lons[1] - lons[0])), abs(float(lats[1] - lats[0])))
+        k = int(round(D['step'] / src)) if src > 0 else 1
+        if k >= 2:
+            v = boxmean(v, k)
     lo = ((lons + 180) % 360) - 180
     oj = np.argsort(lo, kind='stable')
     oi = np.argsort(lats, kind='stable')
@@ -191,7 +220,7 @@ class Store:
         for dom in self.doms:
             D = DOMAINS[dom]
             a = self.data.setdefault(var, {}).setdefault(dom, np.full((len(STEPS), D['ny'], D['nx']), np.nan, np.float32))
-            a[k] = conv(regrid(m, dom))
+            a[k] = conv(regrid(m, dom, var in AREA))
 
     def get(self, var, dom):
         return self.data.get(var, {}).get(dom)
@@ -586,9 +615,9 @@ def gfs():
                 elif sh == 'prmsl':
                     st.put('msl', s, m, lambda x: x / 100)
                 elif sh == 'tp':
-                    apcp[s] = (m['end'] - m['start'], {d: regrid(m, d) for d in st.doms})
+                    apcp[s] = (m['end'] - m['start'], {d: regrid(m, d, True) for d in st.doms})
                 elif sh == 'csnow':
-                    csnow[s] = {d: regrid(m, d) for d in st.doms}
+                    csnow[s] = {d: regrid(m, d, True) for d in st.doms}
                 elif sh == 'tcc' and tl == 'atmosphere':
                     st.put('tcc', s, m)
                 elif sh == 'gust' and tl == 'surface':
