@@ -60,7 +60,8 @@ def quant(var):
             return QUANT[k]
     return QUANT[var[0]] if var[0] in 'tzuv' else (0.01, 0)
 
-ALL_VARS = ['t2m', 'u10', 'v10', 'msl', 'tp', 'sf', 'tcc', 'gust', 'zero'] + \
+# (pioggia, neve e nuvole non più: «Nuvole, pioggia e neve» nell'app è la mappa di MeteoBlue, 22/11/2026)
+ALL_VARS = ['t2m', 'u10', 'v10', 'msl', 'gust', 'zero'] + \
     [f'{p}{l}' for l in LEVELS for p in ('t', 'z', 'u', 'v')] + \
     ['tmax', 'tmin', 'swh', 'mwd', 'mwp', 'sst']          # (queste le dà solo ECMWF)
 ONLY_ECMWF = ('tmax', 'tmin', 'swh', 'mwd', 'mwp', 'sst')
@@ -278,7 +279,7 @@ def ecmwf():
         return None
 
     sfc = {'10u': ('u10', lambda x: x * 3.6), '10v': ('v10', lambda x: x * 3.6), '2t': ('t2m', lambda x: x - 273.15),
-           'msl': ('msl', lambda x: x / 100), 'tp': ('tp', None), 'sf': ('sf', None), 'tcc': ('tcc', None),
+           'msl': ('msl', lambda x: x / 100),
            '10fg': ('gust', lambda x: x * 3.6)}
     for p, (var, conv) in sfc.items():
         data = fetch(p, param=p)
@@ -439,9 +440,8 @@ def icon():
     same('icon', run)
     st = Store(('eu', 'it'))           # l'emisfero nord lo riempie ICON mondiale, qui sotto
     single = {'t_2m': ('t2m', lambda x: x - 273.15), 'u_10m': ('u10', lambda x: x * 3.6), 'v_10m': ('v10', lambda x: x * 3.6),
-              'pmsl': ('msl', lambda x: x / 100), 'tot_prec': ('tp', None), 'clct': ('tcc', None),
-              'vmax_10m': ('gust', lambda x: x * 3.6), 'hzerocl': ('zero', None),
-              'snow_gsp': ('sfa', None), 'snow_con': ('sfb', None)}
+              'pmsl': ('msl', lambda x: x / 100),
+              'vmax_10m': ('gust', lambda x: x * 3.6), 'hzerocl': ('zero', None)}
     jobs = [(v, None, s) for v in single for s in STEPS] + \
         [(v, l, s) for v in ('t', 'u', 'v', 'fi') for l in LEVELS for s in STEPS]
 
@@ -593,7 +593,7 @@ def gfs():
     log('GFS corsa', run)
     same('gfs', run)
     st = Store(ZONE_MODELLO['gfs'])
-    var = '&'.join(f'var_{v}=on' for v in ('TMP', 'UGRD', 'VGRD', 'HGT', 'PRMSL', 'APCP', 'CSNOW', 'TCDC', 'GUST'))
+    var = '&'.join(f'var_{v}=on' for v in ('TMP', 'UGRD', 'VGRD', 'HGT', 'PRMSL', 'GUST'))
     lev = '&'.join(f'lev_{l}=on' for l in ('2_m_above_ground', '10_m_above_ground', 'mean_sea_level', 'surface', 'entire_atmosphere',
                                            '0C_isotherm') + tuple(f'{p}_mb' for p in LEVELS))
     apcp, csnow = {}, {}
@@ -627,23 +627,6 @@ def gfs():
                 elif tl == 'isobaricInhPa' and lv in LEVELS and sh in ('t', 'u', 'v', 'gh'):
                     conv = {'t': lambda x: x - 273.15, 'u': lambda x: x * 3.6, 'v': lambda x: x * 3.6, 'gh': lambda x: x}[sh]
                     st.put({'gh': 'z'}.get(sh, sh) + str(lv), s, m, conv)
-    # pioggia: GFS dà secchi di 3 o 6 ore
-    for dom in st.doms:
-        D = DOMAINS[dom]
-        tp = np.zeros((len(STEPS), D['ny'], D['nx']), np.float32)
-        sf = np.zeros_like(tp)
-        for k, s in enumerate(STEPS):
-            if s not in apcp:
-                continue
-            span, g = apcp[s]
-            v = g[dom]
-            if span == 6 and (s - 3) in apcp:
-                v = v - apcp[s - 3][1][dom]
-            tp[k] = np.maximum(np.nan_to_num(v), 0)
-            if s in csnow:
-                sf[k] = np.where(np.nan_to_num(csnow[s][dom]) > 0.5, tp[k], 0)
-        st.set('tp', dom, tp)
-        st.set('sf', dom, sf)
     return run, st
 
 
